@@ -80,6 +80,7 @@ use secp256k1_musig::musig::PublicNonce;
 
 use crate::{musig, scripts, Vtxo, VtxoId, ServerVtxo};
 use crate::attestations::ArkoorCosignAttestation;
+use crate::encode::{ProtocolDecodingError, ProtocolEncoding, ReadExt, WriteExt};
 use crate::vtxo::{Full, ServerVtxoPolicy, VtxoPolicy, VtxoRef};
 use crate::vtxo::genesis::{GenesisItem, GenesisTransition};
 
@@ -141,6 +142,13 @@ pub enum ArkoorSigningError {
 		expected: usize,
 		got: usize,
 	},
+	#[error("Wrong number of adaptor pre-signatures. Expected {expected}, got {got}")]
+	InvalidNbAdaptorPreSignatures {
+		expected: usize,
+		got: usize,
+	},
+	#[error("Adaptor signing error: {0}")]
+	Adaptor(#[from] musig::AdaptorError),
 }
 
 /// The destination of an arkoor pacakage
@@ -152,6 +160,20 @@ pub struct ArkoorDestination {
 	pub total_amount: Amount,
 	#[serde(with = "crate::encode::serde")]
 	pub policy: VtxoPolicy,
+}
+
+impl ProtocolEncoding for ArkoorDestination {
+	fn encode<W: std::io::Write + ?Sized>(&self, w: &mut W) -> Result<(), std::io::Error> {
+		w.emit_u64(self.total_amount.to_sat())?;
+		self.policy.encode(w)
+	}
+
+	fn decode<R: std::io::Read + ?Sized>(r: &mut R) -> Result<Self, ProtocolDecodingError> {
+		Ok(Self {
+			total_amount: Amount::from_sat(r.read_u64()?),
+			policy: VtxoPolicy::decode(r)?,
+		})
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +256,137 @@ impl ArkoorCosignRequest<VtxoId> {
 	}
 }
 
+/// Arkoor signatures prepared with hidden adaptor nonces but not finalized for witnesses.
+pub struct PreparedAdaptorArkoor {
+	builder: ArkoorBuilder<state::UserGeneratedAdaptorNonces>,
+	adaptor_point: PublicKey,
+	pre_signatures: Vec<musig::AdaptorPreSignature>,
+}
+
+/// A counterparty-safe adaptor-locked arkoor transfer.
+///
+/// This type intentionally contains only public transaction data, public nonces,
+/// server partial signatures, adaptor pre-signatures, and the adaptor lock point.
+/// It does not retain the user's signing keypair, secret nonces, or adaptor secret.
+pub struct TransferableAdaptorArkoor {
+	pub(crate) builder: ArkoorBuilder<state::UserGeneratedAdaptorNonces>,
+	adaptor_point: PublicKey,
+	pre_signatures: Vec<musig::AdaptorPreSignature>,
+}
+
+fn finalize_adaptor_builder(
+	mut builder: ArkoorBuilder<state::UserGeneratedAdaptorNonces>,
+	pre_signatures: &[musig::AdaptorPreSignature],
+	secret: musig::AdaptorSecret,
+) -> Result<ArkoorBuilder<state::UserSigned>, ArkoorSigningError> {
+	if pre_signatures.len() != builder.nb_sigs() {
+		return Err(ArkoorSigningError::InvalidNbAdaptorPreSignatures {
+			expected: builder.nb_sigs(),
+			got: pre_signatures.len(),
+		});
+	}
+
+	let mut sigs = Vec::with_capacity(pre_signatures.len());
+	for (idx, pre_sig) in pre_signatures.iter().enumerate() {
+		let aggregate_key = musig::tweaked_key_agg(
+			[builder.user_pubkey(), builder.server_pubkey()],
+			builder.taptweak_at(idx).to_byte_array(),
+		).1.x_only_public_key().0;
+
+		sigs.push(pre_sig.finalize_with_secret(
+			secret,
+			aggregate_key,
+			builder.sighashes[idx].to_byte_array(),
+		)?);
+	}
+
+	builder.full_signatures = Some(sigs);
+	Ok(builder.to_state::<state::UserSigned>())
+}
+
+impl PreparedAdaptorArkoor {
+	pub fn pre_signatures(&self) -> &[musig::AdaptorPreSignature] {
+		&self.pre_signatures
+	}
+
+	pub fn adaptor_point(&self) -> PublicKey {
+		self.adaptor_point
+	}
+
+	pub fn into_transfer_package(mut self) -> TransferableAdaptorArkoor {
+		self.builder.user_keypair = None;
+		self.builder.user_sec_nonces = None;
+
+		TransferableAdaptorArkoor {
+			builder: self.builder,
+			adaptor_point: self.adaptor_point,
+			pre_signatures: self.pre_signatures,
+		}
+	}
+
+	pub fn finalize_with_secret(
+		self,
+		secret: musig::AdaptorSecret,
+	) -> Result<ArkoorBuilder<state::UserSigned>, ArkoorSigningError> {
+		let Self { builder, pre_signatures, .. } = self;
+		finalize_adaptor_builder(builder, &pre_signatures, secret)
+	}
+}
+
+impl TransferableAdaptorArkoor {
+	pub fn adaptor_point(&self) -> PublicKey {
+		self.adaptor_point
+	}
+
+	pub fn pre_signatures(&self) -> &[musig::AdaptorPreSignature] {
+		&self.pre_signatures
+	}
+
+	pub fn user_pub_nonces(&self) -> &[musig::PublicNonce] {
+		self.builder.user_pub_nonces()
+	}
+
+	pub fn server_pub_nonces(&self) -> &[musig::PublicNonce] {
+		self.builder.server_pub_nonces.as_ref().expect("state invariant")
+	}
+
+	pub fn server_partial_sigs(&self) -> &[musig::PartialSignature] {
+		self.builder.server_partial_sigs.as_ref().expect("state invariant")
+	}
+
+	pub fn input(&self) -> &Vtxo<Full> {
+		self.builder.input()
+	}
+
+	pub fn all_outputs(&self) -> impl Iterator<Item = &ArkoorDestination> + Clone {
+		self.builder.all_outputs()
+	}
+
+	pub fn build_unsigned_vtxos<'a>(&'a self) -> impl Iterator<Item = Vtxo<Full>> + 'a {
+		self.builder.build_unsigned_vtxos()
+	}
+
+	pub fn input_spend_info(&self) -> (VtxoId, Txid) {
+		self.builder.input_spend_info()
+	}
+
+	pub fn spend_info(&self) -> Vec<(VtxoId, Txid)> {
+		self.builder.spend_info()
+	}
+
+	pub fn virtual_transactions(&self) -> Vec<Txid> {
+		self.builder.virtual_transactions()
+	}
+
+	pub fn finalize_with_secret(
+		self,
+		secret: musig::AdaptorSecret,
+	) -> Result<ArkoorBuilder<state::UserSigned>, ArkoorSigningError> {
+		let Self { builder, pre_signatures, .. } = self;
+		finalize_adaptor_builder(builder, &pre_signatures, secret)
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Hash)]
 #[error("invalid attestation")]
 pub struct AttestationError;
@@ -258,6 +411,7 @@ pub mod state {
 		pub trait Sealed {}
 		impl Sealed for super::Initial {}
 		impl Sealed for super::UserGeneratedNonces {}
+		impl Sealed for super::UserGeneratedAdaptorNonces {}
 		impl Sealed for super::UserSigned {}
 		impl Sealed for super::ServerCanCosign {}
 		impl Sealed for super::ServerSigned {}
@@ -272,6 +426,14 @@ pub mod state {
 	// The user has generated their nonces
 	pub struct UserGeneratedNonces;
 	impl BuilderState for UserGeneratedNonces {}
+
+	// The user has generated adaptor nonces for adaptor signing.
+	pub struct UserGeneratedAdaptorNonces;
+	impl BuilderState for UserGeneratedAdaptorNonces {}
+
+	pub trait UserCanRequestCosign: BuilderState {}
+	impl UserCanRequestCosign for UserGeneratedNonces {}
+	impl UserCanRequestCosign for UserGeneratedAdaptorNonces {}
 
 	// The user can sign
 	pub struct UserSigned;
@@ -333,6 +495,9 @@ pub struct ArkoorBuilder<S: state::BuilderState> {
 	server_partial_sigs: Option<Vec<musig::PartialSignature>>,
 	/// `1+n` signatures that are signed by the user and server
 	full_signatures: Option<Vec<schnorr::Signature>>,
+	/// Adaptor point used to hide the user's pre-signatures, when this builder
+	/// is prepared for a PTLC transfer.
+	adaptor_point: Option<PublicKey>,
 
 	_state: PhantomData<S>,
 }
@@ -1022,6 +1187,7 @@ impl<S: state::BuilderState> ArkoorBuilder<S> {
 			server_pub_nonces: self.server_pub_nonces,
 			server_partial_sigs: self.server_partial_sigs,
 			full_signatures: self.full_signatures,
+			adaptor_point: self.adaptor_point,
 			_state: PhantomData,
 		}
 	}
@@ -1235,6 +1401,7 @@ impl ArkoorBuilder<state::Initial> {
 			server_pub_nonces: None,
 			server_partial_sigs: None,
 			full_signatures: None,
+			adaptor_point: None,
 			_state: PhantomData,
 		})
 	}
@@ -1261,6 +1428,34 @@ impl ArkoorBuilder<state::Initial> {
 		self.user_sec_nonces = Some(user_sec_nonces);
 
 		self.to_state::<state::UserGeneratedNonces>()
+	}
+
+	pub fn generate_user_adaptor_nonces(
+		mut self,
+		user_keypair: Keypair,
+		adaptor_point: PublicKey,
+	) -> Result<ArkoorBuilder<state::UserGeneratedAdaptorNonces>, ArkoorSigningError> {
+		let mut user_pub_nonces = Vec::with_capacity(self.nb_sigs());
+		let mut user_sec_nonces = Vec::with_capacity(self.nb_sigs());
+
+		for idx in 0..self.nb_sigs() {
+			let sighash = &self.sighashes[idx].to_byte_array();
+			let (sec_nonce, pub_nonce) = musig::adaptor_nonce_pair_with_msg(
+				&user_keypair,
+				sighash,
+				adaptor_point,
+			)?;
+
+			user_pub_nonces.push(pub_nonce);
+			user_sec_nonces.push(sec_nonce);
+		}
+
+		self.user_keypair = Some(user_keypair);
+		self.user_pub_nonces = Some(user_pub_nonces);
+		self.user_sec_nonces = Some(user_sec_nonces);
+		self.adaptor_point = Some(adaptor_point);
+
+		Ok(self.to_state::<state::UserGeneratedAdaptorNonces>())
 	}
 
 	/// Sets the pub nonces that a user has generated.
@@ -1392,7 +1587,7 @@ impl ArkoorBuilder<state::ServerSigned> {
 	}
 }
 
-impl ArkoorBuilder<state::UserGeneratedNonces> {
+impl<S: state::UserCanRequestCosign> ArkoorBuilder<S> {
 	pub fn user_pub_nonces(&self) -> &[PublicNonce] {
 		self.user_pub_nonces.as_ref().expect("State invariant")
 	}
@@ -1446,7 +1641,9 @@ impl ArkoorBuilder<state::UserGeneratedNonces> {
 		}
 		Ok(())
 	}
+}
 
+impl ArkoorBuilder<state::UserGeneratedNonces> {
 	pub fn user_cosign(
 		mut self,
 		user_keypair: &Keypair,
@@ -1491,6 +1688,62 @@ impl ArkoorBuilder<state::UserGeneratedNonces> {
 		self.full_signatures = Some(sigs);
 
 		Ok(self.to_state::<state::UserSigned>())
+	}
+}
+
+impl ArkoorBuilder<state::UserGeneratedAdaptorNonces> {
+	pub fn user_adaptor_cosign(
+		mut self,
+		user_keypair: &Keypair,
+		server_cosign_data: &ArkoorCosignResponse,
+	) -> Result<PreparedAdaptorArkoor, ArkoorSigningError> {
+		// Verify that the correct user keypair is provided
+		if user_keypair.public_key() != self.input.user_pubkey() {
+			return Err(ArkoorSigningError::IncorrectKey {
+				expected: self.input.user_pubkey(),
+				got: user_keypair.public_key(),
+			});
+		}
+
+		// Verify that the server cosign data is valid
+		self.validate_server_cosign_response(&server_cosign_data)?;
+		self.server_pub_nonces = Some(server_cosign_data.server_pub_nonces.clone());
+		self.server_partial_sigs = Some(server_cosign_data.server_partial_sigs.clone());
+		let adaptor_point = self
+			.adaptor_point
+			.expect("state invariant: adaptor nonces require an adaptor point");
+
+		let mut pre_signatures = Vec::with_capacity(self.nb_sigs());
+
+		// Takes the secret nonces out of the [ArkoorBuilder].
+		// Note, that we can't clone nonces so we can only sign once
+		let user_sec_nonces = self.user_sec_nonces.take().expect("state invariant");
+
+		for (idx, user_sec_nonce) in user_sec_nonces.into_iter().enumerate() {
+			let user_pub_nonce = self.user_pub_nonces()[idx];
+			let server_pub_nonce = server_cosign_data.server_pub_nonces[idx];
+			let agg_nonce = musig::nonce_agg(&[&user_pub_nonce, &server_pub_nonce]);
+
+			let (_partial, pre_sig) = musig::partial_sign(
+				[self.user_pubkey(), self.server_pubkey()],
+				agg_nonce,
+				user_keypair,
+				user_sec_nonce,
+				self.sighashes[idx].to_byte_array(),
+				Some(self.taptweak_at(idx).to_byte_array()),
+				Some(&[&server_cosign_data.server_partial_sigs[idx]])
+			);
+
+			pre_signatures.push(musig::AdaptorPreSignature::new(
+				pre_sig.expect("pre-signature exists when server partial is provided"),
+			));
+		}
+
+		Ok(PreparedAdaptorArkoor {
+			builder: self,
+			adaptor_point,
+			pre_signatures,
+		})
 	}
 }
 
@@ -1759,6 +2012,87 @@ mod test {
 			}
 		}
 
+	}
+
+	#[test]
+	fn build_checkpointed_arkoor_with_hidden_adaptor_nonces() {
+		let alice_keypair = Keypair::new(&SECP, &mut rand::thread_rng());
+		let bob_keypair = Keypair::new(&SECP, &mut rand::thread_rng());
+		let server_keypair = Keypair::new(&SECP, &mut rand::thread_rng());
+		let adaptor_secret = musig::AdaptorSecret::new(bitcoin::secp256k1::SecretKey::new(
+			&mut rand::thread_rng(),
+		));
+		let adaptor_point = adaptor_secret.point();
+
+		let (funding_tx, alice_vtxo) = DummyTestVtxoSpec {
+			amount: Amount::from_sat(100_330),
+			fee: Amount::from_sat(330),
+			expiry_height: 1000,
+			exit_delta : 128,
+			user_keypair: alice_keypair.clone(),
+			server_keypair: server_keypair.clone()
+		}.build();
+
+		alice_vtxo.validate(&funding_tx).expect("The unsigned vtxo is valid");
+
+		let dest = vec![
+			ArkoorDestination {
+				total_amount: Amount::from_sat(96_000),
+				policy: VtxoPolicy::new_pubkey(bob_keypair.public_key())
+			},
+			ArkoorDestination {
+				total_amount: Amount::from_sat(4_000),
+				policy: VtxoPolicy::new_pubkey(alice_keypair.public_key())
+			}
+		];
+
+		let user_builder = ArkoorBuilder::new_with_checkpoint(
+			alice_vtxo.clone(),
+			dest.clone(),
+			vec![],
+		).expect("Valid arkoor request");
+
+		let user_builder = user_builder
+			.generate_user_adaptor_nonces(alice_keypair, adaptor_point)
+			.expect("valid adaptor nonces");
+		let cosign_request = user_builder.cosign_request();
+
+		let server_builder = ArkoorBuilder::from_cosign_request(cosign_request)
+			.expect("Invalid cosign request")
+			.server_cosign(&server_keypair)
+			.expect("Incorrect key");
+
+		let cosign_data = server_builder.cosign_response();
+		let prepared = user_builder
+			.user_adaptor_cosign(&alice_keypair, &cosign_data)
+			.expect("Valid cosign data and correct key");
+		let pre_signatures = prepared.pre_signatures().to_vec();
+
+		let signed_builder = prepared.finalize_with_secret(adaptor_secret)
+			.expect("adaptor secret finalizes the arkoor signatures");
+		verify_signed_internal_vtxos(&signed_builder, &funding_tx);
+
+		for (pre_sig, final_sig) in pre_signatures
+			.iter()
+			.zip(signed_builder.full_signatures.as_ref().unwrap())
+		{
+			let recovered = pre_sig.recover_secret(*final_sig, adaptor_point)
+				.expect("final signature reveals adaptor secret");
+			assert_eq!(recovered.secret_key(), adaptor_secret.secret_key());
+		}
+
+		let vtxos = signed_builder.build_signed_vtxos();
+		for vtxo in vtxos.into_iter() {
+			vtxo.validate(&funding_tx).expect("Invalid VTXO");
+
+			let mut prev_tx = funding_tx.clone();
+			for tx in vtxo.transactions().map(|item| item.tx) {
+				let prev_outpoint: OutPoint = tx.input[0].previous_output;
+				let prev_txout: TxOut = prev_tx.output[prev_outpoint.vout as usize].clone();
+				crate::test_util::verify_tx(&[prev_txout], 0, &tx).expect("Valid transaction");
+				prev_tx = tx;
+			}
+		}
 	}
 
 	#[test]

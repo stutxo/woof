@@ -6,6 +6,10 @@ pub use secp256k1_musig::musig::{
 	AggregatedNonce, PublicNonce, PartialSignature, SecretNonce, Session, SessionSecretRand,
 };
 
+mod adaptor;
+pub use adaptor::{
+	AdaptorError, AdaptorPreSignature, AdaptorSecret, adaptor_nonce_pair_with_msg,
+};
 
 use bitcoin::secp256k1::{schnorr, Keypair, PublicKey, SecretKey};
 use secpm::ffi::MUSIG_SECNONCE_SIZE;

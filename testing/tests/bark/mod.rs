@@ -8,6 +8,7 @@ mod arkoor;
 mod base;
 mod payment_request;
 mod board;
+mod btc_ark_swap;
 mod chain_source;
 mod create;
 mod dust;

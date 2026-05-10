@@ -4,6 +4,12 @@ use std::convert::Infallible;
 use bitcoin::{Transaction, Txid};
 use bitcoin::secp256k1::Keypair;
 
+mod adaptor;
+pub use adaptor::{
+	PreparedAdaptorArkoorPackage, TransferPackageVerificationError,
+	TransferableAdaptorArkoorPackage,
+};
+
 use crate::{Vtxo, VtxoId, VtxoPolicy, ServerVtxo, Amount};
 use crate::arkoor::ArkoorDestination;
 use crate::arkoor::{
@@ -361,7 +367,9 @@ impl ArkoorPackageBuilder<state::UserGeneratedNonces> {
 		}
 		Ok(ArkoorPackageBuilder { builders: packages })
 	}
+}
 
+impl<S: state::UserCanRequestCosign> ArkoorPackageBuilder<S> {
 	pub fn cosign_request(&self) -> ArkoorPackageCosignRequest<Vtxo<Full>> {
 		let requests = self.builders.iter()
 			.map(|package| package.cosign_request())
