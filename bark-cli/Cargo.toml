@@ -30,6 +30,7 @@ bark-wallet = { version = "0.1.4", path = "../bark", default-features = false, f
 bark-bitcoin-ext = { version = "0.1.4", path = "../bitcoin-ext", features = ["rpc-socks5-proxy"] }
 bark-server-rpc = { version = "0.1.4", path = "../server-rpc", default-features = false, features = ["tonic-native", "socks5-proxy"] }
 bark-rest = { version = "0.1.4", path = "../bark-rest" }
+bark-btc-ark-swap = { version = "0.1.4", path = "../bark-btc-ark-swap" }
 
 anyhow.workspace = true
 bitcoin.workspace = true
@@ -52,4 +53,3 @@ futures.workspace = true
 tokio = { workspace = true, features = ["macros", "fs", "signal", "rt-multi-thread"] }
 
 home = "=0.5.9"
-

@@ -339,12 +339,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bark-btc-ark-swap"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "ark-lib",
+ "bark-bitcoin-ext",
+ "bark-wallet",
+ "bitcoin",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bark-cli"
 version = "0.1.4"
 dependencies = [
  "anyhow",
  "ark-lib",
  "bark-bitcoin-ext",
+ "bark-btc-ark-swap",
  "bark-json",
  "bark-rest",
  "bark-server-rpc",

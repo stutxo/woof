@@ -312,6 +312,7 @@ pub mod onchain;
 pub mod payment_request;
 pub mod persist;
 pub mod round;
+pub mod swap;
 pub mod subsystem;
 pub mod vtxo;
 

@@ -5,6 +5,7 @@ mod exit;
 mod lightning;
 mod onchain;
 mod round;
+mod swap;
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -280,6 +281,10 @@ enum Command {
 	#[command(subcommand)]
 	Round(round::RoundCommand),
 
+	/// Swap commands
+	#[command(subcommand)]
+	Swap(swap::SwapCommand),
+
 	/// Watch the wallet for updates
 	#[command()]
 	Watch,
@@ -321,6 +326,12 @@ async fn inner_main(cli: Cli) -> anyhow::Result<()> {
 
 	if let Command::Dev(cmd) = cli.command {
 		return dev::execute_dev_command(cmd, datadir).await;
+	}
+
+	if let Command::Swap(swap::SwapCommand::BtcArk(
+		swap::BtcArkCommand::Coordinator { listen },
+	)) = cli.command {
+		return swap::execute_btc_ark_coordinator_command(listen).await;
 	}
 
 	let (mut wallet, mut onchain) = open_wallet(&datadir).await
@@ -589,6 +600,9 @@ async fn inner_main(cli: Cli) -> anyhow::Result<()> {
 		},
 		Command::Round(cmd) => {
 			round::execute_round_command(cmd, &mut wallet).await?;
+		},
+		Command::Swap(cmd) => {
+			swap::execute_swap_command(cmd, &mut wallet, &mut onchain, &datadir).await?;
 		},
 		Command::Watch => {
 			let wallet = Arc::new(wallet);
