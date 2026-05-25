@@ -50,9 +50,9 @@ monitoring and fallback execution", not "instant off-chain rollback".
 
 - `t`: Alice's adaptor secret.
 - `T = t*G`: Alice's public adaptor point.
-- `A_btc`: Alice's BTC claim key.
-- `B_btc`: Bob's BTC claim key.
-- `K = MuSig2(A_btc, B_btc)`: aggregate BTC claim key.
+- `A_btc`: Alice's BTC claim public key.
+- `B_btc`: Bob's BTC claim public key.
+- `K = MuSig2(A_btc, B_btc)`: aggregate BTC claim public key.
 - `refund_key`: Bob's BTC refund key.
 - `refund_delay`: CSV delay on Bob's BTC refund path.
 - `exit_delta`: Ark VTXO unilateral-exit delay.
@@ -104,9 +104,10 @@ selected for another spend while the swap is pending.
 The current POC uses a JSON relay file. The relay file is public coordination
 data and must never contain mnemonics, secret nonces, or adaptor secrets.
 
-- `request`: Bob's amount, Ark receive address, BTC claim key, BTC refund key,
-  fee rate, and refund delay.
-- `terms`: Alice's BTC payout script, BTC claim key, and adaptor point `T`.
+- `request`: Bob's amount, Ark receive address, BTC claim public key, BTC
+  refund key, fee rate, and refund delay.
+- `terms`: Alice's BTC payout script, BTC claim public key, and adaptor point
+  `T`.
 - `btc_funding`: Bob's BTC lock funding transaction data.
 - `claim_request`: unsigned BTC claim transaction, sighash, tap tweak, and Bob's
   BTC claim nonce.
@@ -133,7 +134,7 @@ Bob chooses:
 
 - Swap amount.
 - Ark receive address.
-- BTC claim key `B_btc`.
+- BTC claim public key `B_btc`.
 - BTC refund key.
 - BTC fee rate.
 - BTC refund delay.
@@ -156,7 +157,7 @@ bark swap btc-ark btc-request \
 Alice verifies Bob's Ark receive address. She chooses:
 
 - BTC payout address.
-- BTC claim key `A_btc`.
+- BTC claim public key `A_btc`.
 - Adaptor secret `t`, publishing only `T`.
 
 Alice writes `terms` and local `ArkPayer` state.

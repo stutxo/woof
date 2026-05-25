@@ -1,6 +1,6 @@
 # BTC-Ark Swap Walkthrough
 
-For the protocol-level review document, see [adaptor-swap-protocol.md](adaptor-swap-protocol.md).
+For the protocol-level review document, see [docs/adaptor-swap-protocol.md](../docs/adaptor-swap-protocol.md).
 
 This is a proof-of-concept BTC-to-Ark VTXO swap using
 `bark swap btc-ark`. The two participants exchange a relay JSON file manually:
@@ -181,7 +181,7 @@ Expected output:
 ```
 
 This writes the amount, BTC payout script, adaptor point `T`, and Ark payer BTC
-claim key into the relay file.
+claim public key into the relay file.
 
 ### 3. BTC payer funds the BTC lock
 
@@ -335,7 +335,8 @@ adaptor secrets, or secret nonces. Over the happy path it accumulates:
 
 - `request`: BTC payer amount, Ark receive address, BTC claim/refund keys, fee
   rate, and refund delay.
-- `terms`: Ark payer BTC payout, adaptor point `T`, and Ark payer BTC claim key.
+- `terms`: Ark payer BTC payout, adaptor point `T`, and Ark payer BTC claim
+  public key.
 - `btc_funding` and `claim_request`: BTC lock funding data and unsigned claim
   transaction template.
 - `ark_transfer`: adaptor-locked Ark transfer package.
