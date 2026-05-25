@@ -13,6 +13,17 @@ that a swap is happening. It sees ordinary Ark wallet operations: an
 adaptor-locked arkoor package, transaction-chain registration, and possible
 emergency exits.
 
+## TLDR Flow
+
+1. Alice chooses adaptor secret `t` and publishes only `T = t*G`.
+2. Bob funds the BTC lock.
+3. Alice creates an Ark transfer with public nonces already adapted to `T`; the
+   Ark server co-signs those nonces.
+4. Bob accepts the adaptor-locked Ark package and gives Alice a BTC claim
+   adaptor signature locked to `T`.
+5. Alice claims BTC with `t`; Bob recovers `t` from that BTC signature and uses
+   it to finalize the Ark receive.
+
 ## Security Summary
 
 Under the assumptions below, neither party can steal the other party's principal:
@@ -69,6 +80,15 @@ Alice creates an adaptor-locked arkoor package that pays Bob's Ark receive
 policy. The package contains server partial signatures and Alice adaptor
 pre-signatures, but not final signatures. Bob can only finalize the received
 VTXO package with `t`.
+
+The Ark transfer sets up the adaptor lock before server co-signing. For each
+arkoor/checkpoint signature, Alice publishes a user public nonce whose first
+nonce point is offset by `T` and keeps the corresponding secret nonce local. The
+Ark server co-signs against those already-adapted public nonces. Alice then
+combines the server partial signatures with her secret nonces into adaptor
+pre-signatures. Those pre-signatures are safe to send to Bob because they verify
+only as adaptor pre-signatures against `T`; they do not become valid Ark
+transaction signatures until Bob learns `t`.
 
 When Alice prepares the transfer, her client stores:
 

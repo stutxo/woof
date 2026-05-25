@@ -14,10 +14,10 @@ use ark::musig::{self, AdaptorSecret, DangerousSecretNonce};
 use bark::Wallet;
 use bark::onchain::{ChainSync, OnchainWallet};
 use bark::swap::btc_ark::{
-    ArkOffer, BtcLockContract, SwapId, SwapRole, SwapStatus,
+    ArkOffer, ArkTransferAcceptanceOptions, BtcLockContract, SwapId, SwapRole, SwapStatus,
     build_cooperative_claim_adaptor_package_from_parts, build_cooperative_claim_tx,
     build_refund_tx, cooperative_claim_sighash, sign_cooperative_claim_partial, sign_refund_tx,
-    verify_ark_transfer_before_acceptance, verify_ark_transfer_offer,
+    verify_ark_transfer_before_acceptance_with_options, verify_ark_transfer_offer,
 };
 
 use crate::relay::{
@@ -136,6 +136,9 @@ pub enum BtcArkCommand {
         coordinator: String,
         #[arg(long)]
         swap: String,
+        /// Permit accepting Ark transfer outputs that expire before the BTC refund window. Testing only.
+        #[arg(long)]
+        allow_short_ark_transfer_expiry: bool,
     },
 
     /// Finalize and broadcast the Ark payer's BTC claim
@@ -570,14 +573,28 @@ async fn execute_btc_ark_command(
 
             output_step(&relay, next_btc_ark_step(&relay), &coordinator);
         }
-        BtcArkCommand::BtcBuildClaimAdaptor { coordinator, swap } => {
+        BtcArkCommand::BtcBuildClaimAdaptor {
+            coordinator,
+            swap,
+            allow_short_ark_transfer_expiry,
+        } => {
             let swap_id = SwapId::from_str(&swap).context("swap must be a 32-byte hex swap id")?;
             let mut relay = load_relay(&coordinator).await?;
             relay.require_swap(swap_id)?;
             ensure_relay_not_cancelled(&relay)?;
 
             if relay.btc_claim_adaptor.is_none() {
-                btc_build_claim_adaptor(wallet, datadir, &coordinator, &mut relay, swap_id).await?;
+                btc_build_claim_adaptor(
+                    wallet,
+                    datadir,
+                    &coordinator,
+                    &mut relay,
+                    swap_id,
+                    ArkTransferAcceptanceOptions {
+                        allow_short_output_expiry: allow_short_ark_transfer_expiry,
+                    },
+                )
+                .await?;
                 output_step(&relay, next_btc_ark_step(&relay), &coordinator);
                 return Ok(());
             }
@@ -883,6 +900,7 @@ async fn btc_build_claim_adaptor(
     coordinator: &str,
     relay: &mut RelayFile,
     swap_id: SwapId,
+    ark_transfer_acceptance: ArkTransferAcceptanceOptions,
 ) -> anyhow::Result<()> {
     let mut state = load_swap_state(datadir, swap_id, SwapRole::BtcPayer).await?;
     verify_relay_matches_local_state(wallet, &state, relay).await?;
@@ -894,7 +912,7 @@ async fn btc_build_claim_adaptor(
     if state.accepted_ark_transfer_hash_hex.is_some() {
         state.verify_accepted_ark_transfer(ark_transfer)?;
     } else {
-        verify_ark_transfer_for_btc_payer(wallet, relay, swap_id).await?;
+        verify_ark_transfer_for_btc_payer(wallet, relay, swap_id, ark_transfer_acceptance).await?;
         state.set_accepted_ark_transfer(ark_transfer)?;
     }
     let terms = relay.terms()?.clone();
@@ -1250,6 +1268,7 @@ async fn verify_ark_transfer_for_btc_payer(
     wallet: &Wallet,
     relay: &RelayFile,
     swap_id: SwapId,
+    acceptance: ArkTransferAcceptanceOptions,
 ) -> anyhow::Result<()> {
     let terms = relay.terms()?.clone();
     let ark_transfer = relay
@@ -1282,7 +1301,12 @@ async fn verify_ark_transfer_for_btc_payer(
     let current_height = wallet.chain.tip().await?;
     let minimum_output_expiry_height =
         current_height.saturating_add(u32::from(relay.request.refund_delay_blocks));
-    verify_ark_transfer_is_safe_to_accept(&offer, &transfer, minimum_output_expiry_height)?;
+    verify_ark_transfer_is_safe_to_accept(
+        &offer,
+        &transfer,
+        minimum_output_expiry_height,
+        acceptance,
+    )?;
 
     Ok(())
 }
@@ -1409,9 +1433,15 @@ fn verify_ark_transfer_is_safe_to_accept(
     offer: &ArkOffer,
     transfer: &ark::arkoor::package::TransferableAdaptorArkoorPackage,
     minimum_output_expiry_height: bitcoin_ext::BlockHeight,
+    acceptance: ArkTransferAcceptanceOptions,
 ) -> anyhow::Result<()> {
-    verify_ark_transfer_before_acceptance(offer, transfer, minimum_output_expiry_height)
-        .context("Ark transfer package is not safe to accept")
+    verify_ark_transfer_before_acceptance_with_options(
+        offer,
+        transfer,
+        minimum_output_expiry_height,
+        acceptance,
+    )
+    .context("Ark transfer package is not safe to accept")
 }
 
 async fn local_keypair(

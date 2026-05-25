@@ -144,6 +144,11 @@ pub enum ArkTransferOfferError {
     AdaptorPointMismatch { expected: PublicKey, got: PublicKey },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ArkTransferAcceptanceOptions {
+    pub allow_short_output_expiry: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct BtcLockContract {
     pub amount: Amount,
@@ -548,6 +553,20 @@ pub fn verify_ark_transfer_before_acceptance(
     transfer: &TransferableAdaptorArkoorPackage,
     minimum_output_expiry_height: BlockHeight,
 ) -> Result<(), TransferPackageVerificationError> {
+    verify_ark_transfer_before_acceptance_with_options(
+        offer,
+        transfer,
+        minimum_output_expiry_height,
+        ArkTransferAcceptanceOptions::default(),
+    )
+}
+
+pub fn verify_ark_transfer_before_acceptance_with_options(
+    offer: &ArkOffer,
+    transfer: &TransferableAdaptorArkoorPackage,
+    minimum_output_expiry_height: BlockHeight,
+    options: ArkTransferAcceptanceOptions,
+) -> Result<(), TransferPackageVerificationError> {
     transfer.verify_public_transfer(
         &offer.ark_input_ids,
         &offer.ark_receive_policy,
@@ -558,7 +577,7 @@ pub fn verify_ark_transfer_before_acceptance(
 
     for output in transfer.build_unsigned_vtxos() {
         let expiry_height = output.expiry_height();
-        if expiry_height <= minimum_output_expiry_height {
+        if !options.allow_short_output_expiry && expiry_height <= minimum_output_expiry_height {
             return Err(TransferPackageVerificationError::OutputExpiryTooSoon {
                 vtxo_id: output.id(),
                 expiry_height,
@@ -868,6 +887,16 @@ mod tests {
             ),
             "{err:#}",
         );
+
+        verify_ark_transfer_before_acceptance_with_options(
+            &offer,
+            &transfer,
+            100,
+            ArkTransferAcceptanceOptions {
+                allow_short_output_expiry: true,
+            },
+        )
+        .expect("short output expiry can be accepted explicitly for testing");
     }
 
     #[test]
